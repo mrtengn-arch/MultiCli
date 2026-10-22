@@ -35,12 +35,24 @@ decision, add it to §4 with a K-number.
   restarted, not reloaded.** Main-process modules are loaded once at startup, so a running
   instance keeps serving the old code — which is what made a fixed remote page still come
   up broken for half an hour (31 Aug 2026 lesson).
+- **Write scratch scripts with the Write tool, never a heredoc.** Even a quoted
+  (`<<'EOF'`) heredoc halves backslashes in this shell: `\\b` lands in the file as `\b`,
+  which JavaScript reads as a backspace character, not a word boundary. This produced a
+  bogus `ENOENT` on a mangled Windows path once and nine false test failures another time
+  — both on 1 Sep 2026, in the same session.
 - **Never call a browser-rendered page verified because you fetched it.** Fetching
   `remote.html` returned a healthy 200 while the page was completely broken in a real
   browser: the failure lived in the subresource requests the browser makes on its own.
   Load it in an actual browser and check something only a working page can satisfy
   (`document.styleSheets.length`, `window.multicli`, a live round trip) — 31 Aug 2026,
   and the test suite had been asserting the broken behaviour as correct.
+- **Electron's renderer has no `window.prompt()`** — it throws `"prompt() is not
+  supported."` (confirmed against the exact installed Electron version, 44.0.0, in a
+  throwaway process). `window.alert()`/`window.confirm()` do work (real blocking native
+  dialogs). Any text-input UI needs a real DOM `<input>` (see `showTextPrompt()` in
+  renderer.js) — a `prompt()` call silently kills whatever click handler called it, no
+  crash, no visible error, so the bug looks exactly like "the button does nothing" (7 Sep
+  2026 lesson, Task dock's New Task button).
 
 ## Structure and references
 

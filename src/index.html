@@ -40,7 +40,8 @@
           <div class="menu-sep"></div>
           <div class="menu-item" data-action="toggle-restore" id="toggle-restore-item"><span class="check"></span><span class="name">Restore Session on Start</span></div>
           <div class="menu-sep"></div>
-          <div class="menu-item" data-action="toggle-dock" id="toggle-dock-item">Show/Hide Limit Panel</div>
+          <div class="menu-item" data-action="toggle-dock" id="toggle-dock-item"><span class="check"></span><span class="name">Limit Panel</span></div>
+          <div class="menu-item" data-action="toggle-task-dock" id="toggle-task-dock-item"><span class="check"></span><span class="name">Task Panel</span></div>
           <div class="menu-item" data-action="toggle-shortcut-bar" id="toggle-shortcut-bar-item"><span class="check"></span><span class="name">Shortcut Bar</span></div>
           <div class="menu-sep"></div>
           <div class="menu-item" data-action="remote-access" id="remote-access-item">Start Remote Access…</div>
@@ -68,15 +69,57 @@
     </div>
   </div>
 
+  <div id="tab-bar">
+    <button class="tab active" data-tab="workspace" id="tab-workspace">Workspace</button>
+    <button class="tab" data-tab="room" id="tab-room"><span id="tab-room-label">Agent Room</span><span class="tab-close" id="tab-room-close" title="Close Agent Room">×</span></button>
+    <div id="room-agent-chips" class="room-agent-chips" hidden></div>
+    <button type="button" id="room-cwd" class="room-cwd" title="Working folder for the agents" hidden></button>
+  </div>
+
   <div id="main-area">
     <div id="panel-grid"></div>
+
+    <div id="agent-room" hidden>
+      <div id="room-chat">
+      <div id="room-log"></div>
+      <div id="room-reply" class="room-reply" hidden>
+        <span id="room-reply-text"></span>
+        <button type="button" id="room-reply-clear" title="Cancel reply">✕</button>
+      </div>
+      <div id="room-attachments" class="room-attachments" hidden></div>
+      <form id="room-form">
+        <button type="button" id="room-attach" title="Add an image to the project">📎</button>
+        <input id="room-input" type="text" autocomplete="off" />
+        <button type="submit" id="room-send">Send</button>
+      </form>
+      <p class="dock-hint" id="room-status"></p>
+      </div>
+      <div id="room-splitter" title="Drag to resize"></div>
+      <aside id="room-files">
+        <div id="room-files-head">
+          <span>Files</span>
+          <button type="button" id="room-files-refresh" title="Refresh">↻</button>
+        </div>
+        <div id="room-file-list"></div>
+        <div id="room-preview"></div>
+      </aside>
+    </div>
 
     <div id="limit-dock">
       <h3 id="dock-title">Quota Tracking</h3>
       <p class="dock-hint" id="dock-hint">Not connected to real data yet (PROJECT.md §3.5) — placeholder.</p>
+      <!-- Claude is the only agent with a real server-issued percentage (K25), so it
+           gets two true bars instead of one invented one. -->
       <div class="dock-card" data-agent="claude">
         <div class="dock-card-head"><span class="dot"></span>Claude</div>
-        <div class="dock-bar"><div class="dock-bar-fill" style="width:0%"></div></div>
+        <div class="dock-limit" data-band="fiveHour">
+          <div class="dock-limit-label"><span class="band-name">5h</span><span class="band-reset"></span><span class="band-pct">—</span></div>
+          <div class="dock-bar"><div class="dock-bar-fill" style="width:0%"></div></div>
+        </div>
+        <div class="dock-limit" data-band="sevenDay">
+          <div class="dock-limit-label"><span class="band-name">Weekly</span><span class="band-reset"></span><span class="band-pct">—</span></div>
+          <div class="dock-bar"><div class="dock-bar-fill" style="width:0%"></div></div>
+        </div>
         <div class="dock-meta">—</div>
       </div>
       <div class="dock-card" data-agent="gemini">
@@ -99,6 +142,15 @@
         <div class="dock-bar"><div class="dock-bar-fill" style="width:0%"></div></div>
         <div class="dock-meta">—</div>
       </div>
+    </div>
+
+    <div id="task-dock">
+      <div class="dock-head-row">
+        <h3 id="task-dock-title">Tasks</h3>
+        <button id="task-new-btn" title="New task">+ New Task</button>
+      </div>
+      <p class="dock-hint" id="task-dock-hint">No tasks yet.</p>
+      <div id="task-list"></div>
     </div>
   </div>
 

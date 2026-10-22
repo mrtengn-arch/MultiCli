@@ -157,12 +157,13 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.project-row .remove-x {
+.remove-x {
   opacity: 0.4;
   flex: 0 0 auto;
   padding: 0 4px;
+  cursor: pointer;
 }
-.project-row .remove-x:hover { opacity: 1; color: var(--danger); }
+.remove-x:hover { opacity: 1; color: var(--danger); }
 
 /* Small floating picker used by the per-panel folder button */
 .project-picker {
@@ -282,6 +283,158 @@ body.remote #titlebar-right { display: none; }
    transformed ancestor becomes the containing block even for `position:fixed`). Instead
    renderView() puts the single maximized panel into a `.view-max` host on its own —
    works identically in all three view modes. */
+/* Tabs above the main area; the Agent Room replaces the workspace inside #main-area. */
+[hidden] { display: none !important; }
+#tab-bar {
+  display: flex;
+  gap: 2px;
+  padding: 0 8px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.tab-close { margin-left: 8px; color: var(--text-dim); }
+.tab-close:hover { color: var(--text); }
+#agent-room {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+#room-chat {
+  flex: 1;
+  min-width: 240px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+#room-splitter { width: 5px; cursor: col-resize; background: var(--border); flex: none; }
+#room-splitter:hover { background: var(--accent); }
+#room-files {
+  width: 360px;
+  flex: none;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-raised);
+}
+#room-files-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+#room-files-head button { background: none; border: none; color: var(--text-dim); cursor: pointer; }
+#room-file-list { max-height: 40%; overflow-y: auto; border-bottom: 1px solid var(--border); }
+.room-file { padding: 5px 10px; font-size: 12px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
+.room-file:hover { background: var(--bg-panel); }
+.room-file.active { background: var(--bg-panel); color: var(--text); }
+.room-file .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.room-file .new { color: var(--accent); font-size: 10px; flex: none; }
+#room-preview { flex: 1; min-height: 0; overflow: auto; padding: 10px; }
+#room-preview img { max-width: 100%; height: auto; display: block; }
+#room-preview pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; margin: 0; }
+#room-preview .hint { font-size: 12px; color: var(--text-dim); }
+/* body is user-select: none; the room text has to be selectable to copy it. */
+#agent-room { user-select: text; }
+.room-agent-chips { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.room-chip { background: none; border: 1px solid var(--border); border-radius: 999px; color: var(--text-dim); font-size: 11px; padding: 2px 8px; cursor: pointer; }
+.room-chip:hover { color: var(--text); }
+.room-chip.on { color: var(--text); border-color: var(--accent); }
+.room-chip.off { opacity: 0.55; }
+.room-chips-label { font-size: 11px; color: var(--text-dim); margin-right: 4px; white-space: nowrap; }
+.room-cwd {
+  margin-left: 0;
+  align-self: center;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.room-cwd:hover { color: var(--text); border-color: var(--text-dim); }
+#room-log {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 50px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+#room-log::-webkit-scrollbar { width: 8px; }
+#room-log::-webkit-scrollbar-track { background: transparent; }
+#room-log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+#room-log::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+.room-copy {
+  float: right;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 1px 6px;
+  margin-left: 8px;
+  cursor: pointer;
+}
+.room-copy:hover { color: var(--text); border-color: var(--text-dim); }
+.room-msg {
+  max-width: 78%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.room-msg.room-user { align-self: flex-end; border-color: var(--accent); }
+.room-msg.room-claude { border-left: 3px solid #d97757; }
+.room-msg.room-gemini { border-left: 3px solid #2dd4bf; }
+.room-msg.room-codex { border-left: 3px solid var(--glow); }
+.room-msg.room-error { color: var(--danger); }
+.room-who { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+.room-thinking { opacity: 0.6; font-style: italic; }
+.room-quote { font-size: 11px; color: var(--text-dim); border-left: 2px solid var(--border); padding-left: 6px; margin-bottom: 6px; }
+.room-reply { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); }
+.room-reply span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.room-reply button { background: none; border: none; color: var(--text-dim); cursor: pointer; }
+.room-text { white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.5; }
+/* 15 lines at the 1.5 line-height above; the rest sits behind the Expand button. */
+.room-text.collapsed { max-height: 22.5em; overflow: hidden; }
+.room-attachments { display: flex; flex-wrap: wrap; gap: 8px; }
+.room-attach { position: relative; }
+.room-attach img { display: block; width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+.room-attach button { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--border); background: var(--bg-panel); color: var(--text-dim); font-size: 10px; line-height: 1; cursor: pointer; padding: 0; }
+.room-media { display: block; max-width: 100%; max-height: 240px; margin-top: 6px; border-radius: 6px; border: 1px solid var(--border); }
+.room-fold { margin-top: 4px; background: none; border: none; color: var(--text-dim); font-size: 11px; cursor: pointer; padding: 0; }
+.room-fold:hover { color: var(--text); }
+#room-form { display: flex; gap: 8px; }
+#room-input {
+  flex: 1;
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+#room-send { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 8px 14px; cursor: pointer; }
+#room-send:disabled, #room-input:disabled { opacity: 0.5; }
+
 #panel-grid.view-max {
   display: flex;
   padding: 6px;
@@ -624,6 +777,23 @@ body.remote #titlebar-right { display: none; }
   width: 7px; height: 7px; border-radius: 50%;
   background: #4a4f5c;
 }
+/* A named limit band (5-hour / weekly) inside the Claude card — see K25. */
+.dock-limit { margin-bottom: 8px; }
+.dock-limit:last-of-type { margin-bottom: 6px; }
+.dock-limit-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+.dock-limit-label .band-reset { flex: 1 1 auto; opacity: .75; }
+.dock-limit-label .band-pct { font-weight: 600; color: var(--text); }
+/* Only refreshed while Claude Code runs, so say so rather than showing a stale number
+   with the same confidence as a fresh one. */
+.dock-card.is-stale .dock-limit { opacity: .55; }
+
 .dock-bar {
   height: 6px;
   border-radius: 3px;
@@ -638,6 +808,88 @@ body.remote #titlebar-right { display: none; }
 .dock-meta {
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* ---------------- Right task dock (Phase 1, K26) ---------------- */
+/* Reuses #limit-dock's own layout/.dock-card/.dock-hint rules above — only the bits
+   with no equivalent there (header row, phase rows, buttons) get new rules. */
+
+#task-dock {
+  width: 220px;
+  flex: 0 0 220px;
+  background: var(--bg-raised);
+  border-left: 1px solid var(--border);
+  padding: 12px;
+  overflow-y: auto;
+}
+#task-dock.hidden { display: none; }
+#task-dock h3 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+.dock-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+#task-new-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  font-size: 10px;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+#task-new-btn:hover { color: var(--text); border-color: var(--text-dim); }
+
+.task-project {
+  font-size: 10px;
+  color: var(--text-dim);
+  opacity: .75;
+  margin: -4px 0 6px;
+}
+.task-phase-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.task-phase-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 10px;
+  padding: 2px 6px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.task-phase-btn:hover { border-color: var(--text-dim); }
+
+/* The New Task title box (.task-prompt is a .project-picker) — Electron has no
+   window.prompt(), so this is a real input instead. */
+.task-prompt { padding: 10px; }
+.task-prompt-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+}
+.task-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 /* ---------------- Bottom shortcut hint bar ---------------- */

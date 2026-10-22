@@ -8,13 +8,14 @@
 //         29 Aug 2026 (K15/K16/K17): workspace + scrollback persistence, attention
 //         notifications; see the sections near the bottom of this file.
 
-const { app, BrowserWindow, ipcMain, dialog, Menu, Notification, shell, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, Notification, shell, clipboard, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const pty = require('node-pty');
 const crypto = require('crypto');
 const remote = require('./remote');
+const room = require('./room');
 
 // Safety net: an uncaught exception in the main process otherwise crashes the whole
 // app and shows Electron's native "A JavaScript error occurred in the main process"
@@ -219,13 +220,61 @@ function computeCodexUsage() {
   return null;
 }
 
+// ---- Claude's REAL limit state (K25) ----
+// The token scan above measures the wrong thing. Calibrated against the 8 genuine
+// rate-limit events sitting in the transcripts (assistant messages carrying
+// `quotaLimits.status === 'rejected'`), the input+output count read a median of 381K at
+// the exact moment the limit was actually exhausted — anywhere from 313K to 1.97M, a 6x
+// spread. Against the old 1M visual cap that means the bar showed roughly 38% full when
+// the account was in fact locked out, which is what made the dock useless. Adding
+// cache_creation or cache_read doesn't rescue it either (4.4x and 6.3x spreads), and
+// neither does splitting by model. No local token metric can work: the limit is
+// cost-weighted server-side and pooled at org level, so usage from other machines never
+// touches this one's files at all.
+// Claude Code already asks the server for the real figure and caches the answer in
+// ~/.claude.json under `cachedUsageUtilization`. Reading that gives us true percentages
+// and true reset times while still making zero network requests of our own — Claude Code
+// does the fetching, we only read the file it leaves behind.
+const UTILIZATION_STALE_MS = 15 * 60 * 1000; // past this a cached figure stops meaning much
+
+function readClaudeUtilization() {
+  let raw;
+  try { raw = fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'); } catch { return null; }
+  let cached;
+  try { cached = JSON.parse(raw).cachedUsageUtilization; } catch { return null; }
+  const u = cached?.utilization;
+  if (!u) return null;
+  // `resets_at` is an ISO string here. (The per-message `quotaLimits.resetsAt` seen in
+  // transcripts is unix *seconds* — different shape, same clock.)
+  const band = (b) => (b && typeof b.utilization === 'number')
+    ? { pct: b.utilization, resetsAt: Date.parse(b.resets_at) || null, locked: b.locked_reason || null }
+    : null;
+  const s = u.spend;
+  const spend = (s && s.enabled) ? {
+    pct: s.percent ?? 0,
+    used: (s.used?.amount_minor ?? 0) / 100,
+    limit: (s.limit?.amount_minor ?? 0) / 100,
+  } : null;
+  return {
+    fiveHour: band(u.five_hour),
+    sevenDay: band(u.seven_day),
+    spend,
+    fetchedAtMs: cached.fetchedAtMs || null,
+    // Only refreshed while Claude Code is running, so it can go quietly out of date.
+    stale: !cached.fetchedAtMs || (Date.now() - cached.fetchedAtMs) > UTILIZATION_STALE_MS,
+  };
+}
+
 // Named (rather than an inline arrow passed straight to ipcMain.handle) so the same
 // function body can also be reached from a remote-access WebSocket call (see
 // `remoteHandlers` near the bottom) — one implementation, two transports.
 function quotasGet() {
   const safe = (fn) => { try { return fn(); } catch { return null; } };
   return {
+    // `claude` is now just activity ("how much did this machine process") — the gauge
+    // itself is `claudeLimits`, which is real.
     claude: safe(computeClaudeUsage),
+    claudeLimits: safe(readClaudeUtilization),
     gemini: safe(computeGeminiUsage),
     qwen: safe(computeQwenUsage),
     codex: safe(computeCodexUsage),
@@ -356,6 +405,34 @@ function sessionVerify(_event, { agentId, cwd, sessionId, since }) {
   return stat.birthtimeMs >= since - 1000 ? sessionId : null;
 }
 ipcMain.handle('session:verify', sessionVerify);
+
+// The last N assistant turns of a claimed transcript, as plain text — the payload a
+// Task handoff (PROJECT.md §3.6) reads to hand phase N's output to phase N+1. Same
+// coverage rule as readSessionUsage/quotasGetSession: only claude/gemini have a
+// readable transcript, and only a *claimed* session id is ever trusted (see the
+// session:verify comment above on why a folder-newest fallback was deleted).
+function sessionTail(_event, { agentId, cwd, sessionId, turns = 1 }) {
+  const dir = sessionDirFor(agentId, cwd);
+  if (!dir || !sessionId) return null;
+  const file = path.join(dir, `${sessionId}.jsonl`);
+  const texts = [];
+  for (const obj of readRecentJsonlLines(file, 0)) {
+    if (agentId === 'claude') {
+      if (obj.type !== 'assistant' || !Array.isArray(obj.message?.content)) continue;
+      const text = obj.message.content
+        .filter((b) => b.type === 'text' && b.text)
+        .map((b) => b.text)
+        .join('\n');
+      if (text) texts.push(text);
+    } else if (agentId === 'gemini') {
+      if (obj.type !== 'gemini' || !obj.content) continue;
+      texts.push(obj.content);
+    }
+  }
+  if (!texts.length) return null;
+  return texts.slice(-turns).join('\n\n---\n\n');
+}
+ipcMain.handle('session:tail', sessionTail);
 
 // cutoff 0 = no time window; a session total covers the whole transcript.
 function readSessionUsage(agentId, file) {
@@ -510,6 +587,209 @@ function workspaceSave(_event, ws) {
   saveConfig(cfg);
 }
 ipcMain.on('workspace:save', workspaceSave);
+
+// ---- Task persistence (Phase 1 of the Task/orchestrator design, K26) ----
+// A Task is an ordered list of Phases (each an agent + a status), scoped to a project
+// path. The renderer owns all the logic — starting a phase's panel, reading its output
+// back via session:tail, deciding when a phase counts as "done" — this is just a
+// snapshot store, same role workspace:get/save plays for panel layout.
+function tasksGet() { return loadConfig().tasks || []; }
+ipcMain.handle('tasks:get', tasksGet);
+
+function tasksSave(_event, tasks) {
+  const cfg = loadConfig();
+  cfg.tasks = tasks;
+  saveConfig(cfg);
+}
+ipcMain.on('tasks:save', tasksSave);
+
+// A phase's output as a small text file the next phase's agent is pointed at with one
+// pty line, instead of being pasted into the TUI directly — a multi-KB paste garbles a
+// terminal input line. Same safe-key pattern as scrollbackFile below (keys come from the
+// renderer, so they must never escape the folder via `../` or an absolute path).
+function taskHandoffDir() {
+  const dir = path.join(app.getPath('userData'), 'task-handoff');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch { /* already there */ }
+  return dir;
+}
+
+function taskHandoffFile(key) {
+  if (typeof key !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(key)) return null;
+  return path.join(taskHandoffDir(), `${key}.txt`);
+}
+
+function taskHandoffWrite(_event, { key, text }) {
+  const file = taskHandoffFile(key);
+  if (!file) return null;
+  try { fs.writeFileSync(file, text || '', 'utf8'); return file; } catch { return null; }
+}
+ipcMain.handle('tasks:writeHandoff', taskHandoffWrite);
+
+// ---- Agent Room: agents talk to each other in a per-project room (room.js) ----
+// The renderer sends a project folder it already has open; anything that is not an
+// existing directory is refused before it can become a path to write to.
+function roomDir(projectDir) {
+  if (typeof projectDir !== 'string' || !fs.existsSync(projectDir)) return null;
+  return fs.statSync(projectDir).isDirectory() ? projectDir : null;
+}
+ipcMain.handle('room:get', (_event, projectDir) => {
+  const dir = roomDir(projectDir);
+  return dir ? room.load(dir) : null;
+});
+// cwd is where the agents run; null goes back to the project folder. Must be a real folder.
+ipcMain.handle('room:setCwd', (_event, { projectDir, cwd }) => {
+  const dir = roomDir(projectDir);
+  if (!dir) return null;
+  if (cwd !== null && !roomDir(cwd)) return null;
+  return room.setCwd(dir, cwd);
+});
+// ---- Agent Room file viewer ----
+// The agents' working folder (room cwd, else the project) is what the file list shows. Reads are
+// limited to that folder, so a path from the window can't reach outside it.
+const ROOM_FILE_SKIP = new Set(['node_modules', '.git', 'dist', 'build', '__pycache__']);
+const ROOM_IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.svg': 'image/svg+xml' };
+const ROOM_MAX_IMAGE = 8 * 1024 * 1024;
+const ROOM_MAX_TEXT = 300 * 1024;
+
+function roomRoot(projectDir) {
+  const dir = roomDir(projectDir);
+  if (!dir) return null;
+  return room.load(dir).cwd || dir;
+}
+
+function listRoomFiles(root) {
+  const out = [];
+  const walk = (rel, depth) => {
+    if (depth > 4) return;
+    for (const entry of fs.readdirSync(path.join(root, rel), { withFileTypes: true })) {
+      if (out.length >= 400) return;
+      if (entry.name.startsWith('.') || ROOM_FILE_SKIP.has(entry.name)) continue;
+      const childRel = path.join(rel, entry.name);
+      if (entry.isDirectory()) walk(childRel, depth + 1);
+      else if (entry.isFile()) {
+        const st = fs.statSync(path.join(root, childRel));
+        out.push({ path: childRel.split(path.sep).join('/'), size: st.size, mtime: st.mtimeMs });
+      }
+    }
+  };
+  try { walk('', 0); } catch { /* unreadable folder: show what we got */ }
+  return out.sort((a, b) => b.mtime - a.mtime);
+}
+
+// Ctrl+V of a picture in the room: saved as a numbered JPEG under <project>/Otomatik Media/.
+// Returns the absolute path, so the agents can open the same file the user pasted.
+// Next free number in <project>/Otomatik Media/, with the given extension.
+function mediaFile(projectDir, ext) {
+  const folder = path.join(projectDir, 'Otomatik Media');
+  fs.mkdirSync(folder, { recursive: true });
+  const used = fs.readdirSync(folder).map((f) => /^(\d+)\.\w+$/.exec(f)).filter(Boolean).map((m) => Number(m[1]));
+  return path.join(folder, `${(used.length ? Math.max(...used) : 0) + 1}${ext}`);
+}
+
+// Preview of an image saved in <project>/Otomatik Media/. Only that folder can be read this way.
+ipcMain.handle('room:readMedia', (_event, { projectDir, absPath }) => {
+  const dir = roomDir(projectDir);
+  if (!dir || typeof absPath !== 'string') return null;
+  const folder = path.resolve(dir, 'Otomatik Media');
+  const full = path.resolve(absPath);
+  const ext = path.extname(full).toLowerCase();
+  if (!full.startsWith(folder + path.sep) || !ROOM_IMAGE_TYPES[ext]) return null;
+  if (!fs.existsSync(full) || fs.statSync(full).size > ROOM_MAX_IMAGE) return null;
+  return `data:${ROOM_IMAGE_TYPES[ext]};base64,${fs.readFileSync(full).toString('base64')}`;
+});
+
+// A copied image file (or its path text, which is what Explorer and Snipping Tool's saved file give):
+// copied into Otomatik Media under the next number, keeping its format.
+ipcMain.handle('room:importImage', (_event, { projectDir, src }) => {
+  const dir = roomDir(projectDir);
+  if (!dir || typeof src !== 'string') return null;
+  const ext = path.extname(src).toLowerCase();
+  if (!ROOM_IMAGE_TYPES[ext] || !fs.existsSync(src) || !fs.statSync(src).isFile()) return null;
+  const file = mediaFile(dir, ext);
+  fs.copyFileSync(src, file);
+  return file;
+});
+
+// Pasted picture as base64 PNG/JPEG data from the renderer's paste event.
+ipcMain.handle('room:saveImageData', (_event, { projectDir, base64 }) => {
+  const dir = roomDir(projectDir);
+  if (!dir || typeof base64 !== 'string') return null;
+  const img = nativeImage.createFromBuffer(Buffer.from(base64, 'base64'));
+  if (img.isEmpty()) return null;
+  const file = mediaFile(dir, '.jpeg');
+  fs.writeFileSync(file, img.toJPEG(90));
+  return file;
+});
+
+ipcMain.handle('room:saveImage', (_event, projectDir) => {
+  const dir = roomDir(projectDir);
+  const img = clipboard.readImage();
+  if (!dir || img.isEmpty()) return null;
+  const file = mediaFile(dir, '.jpeg');
+  fs.writeFileSync(file, img.toJPEG(90));
+  return file;
+});
+
+// The 📎 button: pick an image file from disk and copy it in, keeping its own format.
+ipcMain.handle('room:pickImage', async (_event, projectDir) => {
+  const dir = roomDir(projectDir);
+  if (!dir) return null;
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] }],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  const src = result.filePaths[0];
+  const file = mediaFile(dir, path.extname(src).toLowerCase());
+  fs.copyFileSync(src, file);
+  return file;
+});
+
+ipcMain.handle('room:files', (_event, projectDir) => {
+  const root = roomRoot(projectDir);
+  return root ? { root, files: listRoomFiles(root) } : null;
+});
+ipcMain.handle('room:readFile', (_event, { projectDir, relPath }) => {
+  const root = roomRoot(projectDir);
+  if (!root || typeof relPath !== 'string') return null;
+  const full = path.resolve(root, relPath);
+  if (!full.startsWith(path.resolve(root) + path.sep)) return null;
+  const st = fs.statSync(full);
+  if (!st.isFile()) return null;
+  const ext = path.extname(full).toLowerCase();
+  if (ROOM_IMAGE_TYPES[ext]) {
+    if (st.size > ROOM_MAX_IMAGE) return { kind: 'error', message: 'Image is larger than 8 MB.' };
+    const data = fs.readFileSync(full).toString('base64');
+    return { kind: 'image', dataUrl: `data:${ROOM_IMAGE_TYPES[ext]};base64,${data}` };
+  }
+  const fd = fs.openSync(full, 'r');
+  const head = Buffer.alloc(Math.min(8000, st.size));
+  fs.readSync(fd, head, 0, head.length, 0);
+  fs.closeSync(fd);
+  if (head.includes(0)) return { kind: 'binary', size: st.size };
+  const truncated = st.size > ROOM_MAX_TEXT;
+  const body = Buffer.alloc(Math.min(st.size, ROOM_MAX_TEXT));
+  const fd2 = fs.openSync(full, 'r');
+  fs.readSync(fd2, body, 0, body.length, 0);
+  fs.closeSync(fd2);
+  return { kind: 'text', text: body.toString('utf8'), truncated };
+});
+
+ipcMain.handle('room:agents', (_event, projectDir) => {
+  const dir = roomDir(projectDir);
+  return dir ? room.agentState(dir) : null;
+});
+ipcMain.handle('room:setAgents', (_event, { projectDir, agents }) => {
+  const dir = roomDir(projectDir);
+  if (!dir || !Array.isArray(agents)) return null;
+  return room.setAgents(dir, agents);
+});
+ipcMain.handle('room:post', (event, { projectDir, text, replyTo }) => {
+  const dir = roomDir(projectDir);
+  if (!dir || typeof text !== 'string' || !text.trim()) return null;
+  const parent = typeof replyTo === 'string' ? replyTo : null;
+  return room.post(dir, text.trim(), (log, thinking) => event.sender.send('room:update', { log, thinking }), parent);
+});
 
 // ---- Scrollback persistence (K16) ----
 // Panels get their terminal history back on restart so a restored panel doesn't come
@@ -716,8 +996,12 @@ const remoteHandlers = {
   'settings:setAgentColor': settingsSetAgentColor,
   'session:claim': sessionClaim,
   'session:verify': sessionVerify,
+  'session:tail': sessionTail,
   'workspace:get': workspaceGet,
   'workspace:save': workspaceSave,
+  'tasks:get': tasksGet,
+  'tasks:save': tasksSave,
+  'tasks:writeHandoff': taskHandoffWrite,
   'scrollback:save': scrollbackSave,
   'scrollback:load': scrollbackLoad,
   'scrollback:clear': scrollbackClear,

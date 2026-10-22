@@ -118,6 +118,18 @@
         call('session:claim', { agentId, cwd, sinceMs, taken, current }),
       verify: (agentId, cwd, sessionId, since) =>
         call('session:verify', { agentId, cwd, sessionId, since }),
+      tail: (agentId, cwd, sessionId, turns) =>
+        call('session:tail', { agentId, cwd, sessionId, turns }),
+    },
+    room: {
+      get: (projectDir) => call('room:get', projectDir),
+      post: (projectDir, text) => call('room:post', { projectDir, text }),
+      setCwd: (projectDir, cwd) => call('room:setCwd', { projectDir, cwd }),
+    },
+    tasks: {
+      get: () => call('tasks:get'),
+      save: (tasks) => call('tasks:save', tasks),
+      writeHandoff: (key, text) => call('tasks:writeHandoff', { key, text }),
     },
     workspace: {
       get: () => call('workspace:get'),

@@ -4,3 +4,7 @@ electron-out.log
 *.log
 .DS_Store
 Thumbs.db
+
+# Agent Room data (conversation log, saved images): private to this machine
+.multicli/
+Otomatik Media/

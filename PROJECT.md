@@ -149,30 +149,67 @@ Overall a **highly feasible** design; the risk concentrates in two areas:
   already experiences RAM pressure — if this runs on this machine/NexusCore, starting
   with 3-4 panels and expanding is safer than targeting 6-8 from the start.
 
-### 3.5 Quota Sources — Status (26 Aug 2026, researched + partially implemented)
+### 3.5 Quota Sources — Status (26 Aug 2026, researched; Claude replaced 1 Sep 2026)
 
 | Agent | Local source | Status |
 |-------|-------------|--------|
-| **Claude** | `~/.claude/projects/**/*.jsonl` — every assistant message has `message.usage.{input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens}` | ✅ **Working** — only input+output are summed (cache_read excluded, see why below) |
+| **Claude — limits** | `~/.claude.json` → `cachedUsageUtilization` — the **server's own** answer, fetched and cached by Claude Code itself: `five_hour.utilization`, `seven_day.utilization`, `resets_at`, `locked_reason`, plus `spend` (extra-credit balance) | ✅ **Real percentages** (K25, 1 Sep 2026) — this is what the bars show now |
+| **Claude — activity** | `~/.claude/projects/**/*.jsonl` — every assistant message has `message.usage.{input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens}` | ✅ Working, but **demoted**: input+output over 5h is shown as a footnote ("how much this machine processed"), it no longer drives any bar — see the calibration below |
 | **Gemini** | `~/.gemini/tmp/<project>/chats/session-*.jsonl` — every message has `tokens:{input,output,cached,total}` | ✅ **Working** — `tokens.total` is already a net value excluding cache, used directly |
 | **Qwen** | `~/.qwen/tmp/**/logs.json` is always empty, `~/.qwen/projects/**/*.runtime.json` is just process metadata (pid/cwd, no tokens) | ❌ No local source found; `computeQwenUsage()` returns null, the UI shows "no local data" |
 | **Codex** | `~/.codex/logs_2.sqlite` (Rust tracing/HTTP log, no tokens) BUT codex's internal "app-server" JSON-RPC daemon has a **real** `account/rateLimits/read` method (used by codex-tui, spotted in the logs via `node:sqlite`) | ❌ Still null for now — would need a JSON-RPC client wired up to `codex app-server`; not done this session |
 
-**Important correction:** the first attempt summed input+output+cache_read for Claude,
+**Correction 1 (26 Aug):** the first attempt summed input+output+cache_read for Claude,
 which produced **111 million tokens** in a single session (meaningless) — because with
 prompt caching, the same large context gets "re-read" on every turn
 (`cache_read_input_tokens` alone can be 300K+ in a single message). Cache reads are
-billed far cheaper and don't map onto rate-limit consumption with the same weight, so
-now only the "fresh" input+output is summed (sane numbers, ~700K/5h). **We can't compute
-a "% remaining"** because we don't know the plan cap (5-hour/weekly limit) from local
-files alone — the dock shows the raw token count + message count, and the bar's fill
-(`QUOTA_VISUAL_CAP=1M`) is an arbitrary visual reference, not a real percentage.
+billed far cheaper, so only the "fresh" input+output is summed (sane numbers, ~700K/5h).
 
-Implementation: in `main.js`, `computeClaudeUsage()`/`computeGeminiUsage()` scan the
-files and sum over a rolling 5-hour window, returned via the `quotas:get` IPC call; in
-the renderer, `refreshQuotas()` polls every 45 seconds and updates both the title-bar
-mini indicators and the right-side dock cards. No network requests are made at all
-(purely local file reading).
+**Correction 2 (1 Sep) — the token count was never a limit gauge, and now isn't
+presented as one.** Murat reported that the dock never filled up even when his Claude
+limits were plainly exhausted. It was measurable why: Claude Code writes a
+`quotaLimits` object onto assistant messages **when a request is actually rejected**
+(`status: "rejected"`, `rateLimitType: "five_hour"`, `resetsAt` in unix seconds) — 25 such
+events across 8 distinct outages were sitting in this machine's transcripts. Replaying
+the 5-hour window that ended at each outage gives what our metric read at the moment the
+account was genuinely locked out:
+
+| Metric | Reading at real exhaustion | Spread |
+|---|---|---|
+| input+output (what the bar used) | median **381K** → bar ~**38% full** | 313K..1.97M (6.3x) |
+| + cache_creation | median 2.31M | 1.25M..5.49M (4.4x) |
+| + cache_read | median 44.6M | 30M..191M (6.3x) |
+| cost-weighted guess | median 10.1M | 5.7M..27M (4.8x) |
+
+No cap can make a 4–6x spread honest, and splitting by model doesn't rescue it (Opus
+appears in only 3 of the 8 outages). The reason is structural: the limit is cost-weighted
+server-side and **pooled at org level** (the rejection records carry
+`overageDisabledReason: "org_level_disabled_until"`), so usage from other machines and
+other members never touches this machine's files at all. Local token scanning cannot
+work here, no matter how it is weighted.
+
+**The source that does work:** `~/.claude.json` → `cachedUsageUtilization`. Claude Code
+asks the server and caches the real answer there — `five_hour.utilization`,
+`seven_day.utilization`, ISO `resets_at`, `locked_reason`, and a `spend` block for
+extra credits. It refreshed within ~5 minutes during testing. Reading it keeps our
+"passive listening, zero network requests" rule intact: Claude Code does the fetching,
+we only read the file it leaves behind. The file is ~0.1 MB and parses in 1.4 ms, so the
+existing 45-second poll is free. Two caveats, both handled: it only refreshes **while
+Claude Code is running** (`fetchedAtMs` older than 15 min ⇒ flagged stale and dimmed),
+and it is someone else's format, so every field degrades to `null` rather than throwing
+(a crash in this path would take the other agents' figures down with it).
+
+Also fixed by the same change: the **weekly limit was never displayed at all**, and it is
+routinely the one that bites first (73% while the 5-hour band sat at 64% during testing).
+
+Implementation: in `main.js`, `readClaudeUtilization()` reads the real figures while
+`computeClaudeUsage()`/`computeGeminiUsage()` keep scanning transcripts for activity, all
+returned via the `quotas:get` IPC call; in the renderer, `refreshQuotas()` polls every 45
+seconds, delegating Claude to `renderClaudeQuota()` (two real bars, colour-graded, with
+reset clocks) and leaving the other agents on the token count against the frankly
+arbitrary `QUOTA_VISUAL_CAP` — labelled as activity, not claimed to be a limit.
+Covered by `test/quota-limits.test.js` (21 cases, including a live canary that notices if
+upstream renames these fields).
 
 ### 3.6 Remaining Open Decisions / Next Small Details
 
@@ -191,6 +228,29 @@ mini indicators and the right-side dock cards. No network requests are made at a
 - Possible follow-ups from the nodeterm review that were *not* taken: git staging/commit
   UI in-panel, GitHub Issues on the board. Remote access (mobile/browser) *was* taken —
   see §3.7 (K22, 30 Aug 2026).
+- **Task/orchestrator design (5–7 Sep 2026), see K26.** Phase 0 (`session:tail`) shipped
+  7 Sep 2026. **Phase 1 also shipped 7 Sep 2026**: Task record (`cfg.tasks`), the task
+  dock (View → Task Panel), a "+ New Task" picker to build an ordered phase list, and
+  manual Start/Advance buttons per phase — Advance captures the phase's last turn via
+  `session:tail` as handoff text, written to a scratch file (`tasks:writeHandoff`) and
+  pointed at with one pty line when the next phase starts. Still entirely
+  user-triggered — no exit-code detection, no polling, no auto-advance. That's Phase 2,
+  not started.
+  - **Idea added 7 Sep 2026, deferred to Phase 2:** auto-start a phase once its agent's
+    quota limit resets, instead of waiting for a manual Start click. Feasible without a
+    new data source — the quota dock already tracks `resetsAt` per band (K25) — but it's
+    real background automation (a timer watching for a reset crossing, then calling
+    `startPhase()` itself), which is exactly what Phase 1 deliberately left out. Only
+    reliable for Claude; Qwen/Codex have no local quota source to watch (§3.6 above).
+- **Added 5 Sep 2026, deferred — two UI ideas, not started:**
+  - **Status filters** (active / waiting-for-input / idle) applied to Grid/Canvas, not
+    just Board. Cheap: reuses the same K17/K18 attention classification Board already
+    computes, just needs a filter bar wired to it.
+  - **A 4th view mode with a 3D "desktop cube" transition** between panels (Murat's
+    reference: the classic Linux desktop-switcher cube effect). Feasible with plain CSS
+    3D transforms (`perspective`/`rotateY`) — no new dependency — since it only animates
+    the panel container, not the terminal render itself. Purely cosmetic; explicitly
+    lower priority than the Task/orchestrator work below.
 
 ### 3.7 Remote Access (K22, 30 Aug 2026)
 
@@ -290,6 +350,11 @@ Tailscale/LAN-only).
 | K21 | The bottom shortcut bar (Copy/Paste/Select All, K14) becomes **toggleable, default on** rather than deleted | Murat found it redundant in practice — PowerShell's own right-click already does copy/paste (29 Aug 2026). Deleting it would throw away working code and the keyboard-hint text it carries; a View-menu toggle keeps it for anyone who wants the buttons and costs one line of state. This supersedes K14's "buttons are always visible", not the shared-function refactor underneath it |
 | K22 | Remote access is **attach to the live desktop session**, not a second independent instance: a plain HTTP+WS server in the main process (View → Start Remote Access…) serves the same renderer.js/styles.css/xterm bundle to a browser, backed by a WebSocket bridge (`remote-bridge.js`) that mimics preload.js's exact `window.multicli` surface. No TLS (meant for a Tailscale tailnet or plain LAN, not the open internet); a random per-install token gates every request as defense-in-depth. A new main.js-side live-panel registry (`panelMeta`, populated by `panel:announce`/`panel:closed`) lets any newly-connecting viewer — a remote tab, or the host itself after a devtools reload — **attach** to already-running panels via `attachLivePanels()` instead of spawning duplicates; `restoreWorkspace()`'s disk-snapshot spawn path only runs on the host and skips anything already attached. Panel ids were also made collision-resistant (`mintPanelId()`) since two independent JS contexts (host window + remote tab) used to both start counting from 0 | Murat wanted to control the same running Claude/Gemini/etc. sessions from another PC or phone over Tailscale, "kapsam geniş olsun" (broad scope — not just viewing, full control including opening new panels/projects). Reusing renderer.js almost verbatim was far cheaper than building a second UI, but doing so naively (replaying the same boot sequence that spawns ptys) was found — before it ever shipped — to be actively dangerous: main.js's `pty:spawn` kills+replaces whatever already holds an id, so a remote page load could have silently killed live local sessions the moment ids collided. The attach/registry model exists specifically to close that hole. TripMate HQ integration (embedding via nested iframe) was considered and explicitly dropped by Murat in favor of just opening a second browser tab — see the 30 Aug 2026 log entry |
 | K23 | A saved session id is **re-verified against the file on disk before it is resumed** (`session:verify`), not trusted because it was saved. A record must carry provenance (`sessionSince`, the panel start its claim was judged against), its transcript must still be in the panel's folder, and that transcript must have been *created* at or after the claiming run. A record that fails is dropped and the panel starts clean — and, critically, it may not fall back to `claude -c` either | K19 fixed which id a panel *takes*; it did nothing about ids already saved. `sessionClaim` deliberately never drops an id it holds (a transient unreadable directory must not cost a panel its session), so three ids claimed under the old mtime rule survived every launch and kept resuming into Murat's own PowerShell conversation for two days (31 Aug 2026). A forward-only rule can't heal bad state; this is the backward half. Provenance rather than a heuristic re-check, because "was this file created by the run that claimed it" is the actual question and only the claiming run knows its own start time. The `-c` exclusion matters as much as the id check: `-c` means "continue this folder's latest conversation", so falling through to it after rejecting an id would land the panel in the same stranger's session by a different route |
+| K24 | **Choosing a project offers to start an agent in it.** Both entry points — Add Project… and a click on a saved project — open the project and then immediately show an anchored picker of the available agents, with "Just open it" as the way out. Agents that can resume drill into the existing New / Continue last / Choose session… step, so this is one extra level on a path that already existed, not a new interaction | Murat, 1 Sep 2026: "otherwise why add the path at all". Adding a project used to set `openProject` and change nothing else on screen, so the visible result of picking a folder was a label in the title bar — the user then had to go to a second menu to get any use out of it. Since the only thing a project is *for* is running an agent in it, the launch belongs on the same click. The picker is offered rather than forced (and the project is opened before it appears) so the old behaviour is still reachable in one more click, and so a mis-click doesn't spawn a process |
+| K25 | **Claude's quota bars read the server's real number, not our token count.** `readClaudeUtilization()` reads `cachedUsageUtilization` from `~/.claude.json` — true `five_hour`/`seven_day` percentages, reset times and `locked_reason` — and the dock shows two real bars, colour-graded, with the weekly band displayed for the first time. The transcript token scan stays, demoted to a footnote labelled as activity. Still zero network requests of our own; a figure older than 15 minutes is flagged stale and dimmed, because the cache only refreshes while Claude Code runs | Murat, 1 Sep 2026: his limits were exhausted and neither the title bar nor the dock showed anything close to full. It was measurable rather than a matter of opinion: the transcripts contain 25 real rejection events (`quotaLimits.status === 'rejected'`) across 8 outages, and replaying the 5-hour window ending at each one shows the bar read a **median 38% full at the moment of actual lockout**, over a 6.3x spread. Every alternative weighting was tried (cache_creation, cache_read, cost-weighted, per-model) and none got the spread under 4.4x — because the limit is cost-weighted server-side and pooled across the org, so other machines' usage never reaches this one's files. The honest options were to read the real figure or stop calling it a limit; the real figure was already sitting on disk. See §3.5 for the full calibration table |
+| K26 | **Task/orchestrator design (Phase 0 shipped 7 Sep 2026): `session:tail`.** New handler in main.js reads the last N assistant turns of a *claimed* transcript as plain text — same coverage/trust rules as `quotas:getSession` (claude/gemini only, only a `session:claim`-issued id, never a folder-newest guess). Mirrored in `preload.js` and `remote-bridge.js`; `test/session-tail.test.js` pins the two real transcript shapes (Claude's array-of-typed-blocks `message.content`, Gemini's plain-string `content`). Nothing else changed — no Task record, no UI, no handoff wiring yet | This answers the one assumption the whole Task-centric reframe depends on (a multi-turn discussion with Murat, 5–7 Sep 2026, kicked off by a ChatGPT-suggested architecture: Task, not Panel or Agent, as the core object, phases moving PLAN→REVIEW→EXECUTE→VERIFY→GIT across different agents chosen for their cost/quota profile) — whether a transcript's last turn is actually clean enough to hand to the next phase's agent. An `architect` subagent's full proposal (data model, file-by-file plan, migration path, risk list) is on record in this session; §3.6 carries the two much smaller UI ideas (status filters, a 3D panel-switch transition) that came up in the same conversation and were explicitly deferred. Shipping only the extraction function first, with nothing built on top of it yet, follows the proposal's own recommendation and the project's "don't build the orchestrator, build a record and a carrier" framing |
+| K27 | **Task/orchestrator Phase 1 (7 Sep 2026): Task record + task dock, manually driven, zero automation.** `cfg.tasks` (`tasksGet`/`tasksSave`, same snapshot-store pattern as `workspace:get`/`save`) holds `Task { id, projectPath, title, activePhase, phases: [{agentId, label, status, panelKey, sessionId, handoff}] }`. The task dock (`#task-dock`, View → Task Panel, same `.dock-card`/toggle-visibility pattern as the limit dock) lists tasks and their phases with a Start or Advance button depending on status. **Start** spawns the phase's panel (`startAgentPanel`, now returning the panel id so a phase can bind `panelKey` to it) and, if the previous phase left a `handoff`, writes it to a scratch file (new `tasks:writeHandoff`, mirrors `scrollbackFile`'s safe-key pattern) and points the new panel at it with one `pty:write` line rather than pasting it in directly. **Advance** is the only "automation" here and is entirely click-triggered: it calls `session:tail` on the active phase's panel, stores the result as `handoff`, marks the phase done, and moves `activePhase` to the next index — it does not start that next phase itself. New tasks are built through `showNewTaskPicker`/`showAddPhasePicker`, chaining `openPicker` the same way `showAgentLaunchPicker` already does, so phases are added by repeatedly picking an agent until "Done adding phases". `test/tasks.test.js` covers the config round-trip (including that saving tasks doesn't clobber an unrelated `cfg.workspace` key) and the handoff file's safe-key rejection | Follows straight from K26 and the `architect` proposal on record in that session: ship the record and a manual carrier before any automation, so Murat can actually run a multi-phase task by hand (see it, start it, approve the handoff, start the next one) before anything auto-advances on exit code or polls a transcript in the background — that's Phase 2, deliberately not started |
+| K28 | **Agent Room: a per-project chat where the agents take turns (22 Oct 2026).** Tab bar above the main area (Workspace / Agent Room). Each message runs claude, gemini and codex in sequence, each reading the whole room, until an agent ends with [[NEEDS_USER]] (the user is pulled in only then), a 6-reply cap, or a failure. Headless runs in `room.js`; prompt goes over stdin. Log is per project in `.multicli/agent-room.json` | The user wanted the agents to talk among themselves and only ask for the user when approval is needed, and a room per project rather than one global room. Stdin keeps prompts out of argv (no quoting or injection surface). Per-project files mean a room travels with its repo and is opened from any project, not from a menu entry |
 
 ---
 
@@ -889,3 +954,160 @@ Two things this could not prove, because doing so would mean burning real tokens
 CLI: that a *fresh* claim stamps `sessionSince` correctly end-to-end, and that a genuine
 restore resumes the right conversation. Both run through code paths that are covered by
 `test/session-claim.test.js`, but the first real restore is still the moment to watch.
+
+### 2026-09-01
+
+Usability pass on the project flow, all three items reported by Murat in one go.
+
+- **Picking a project now offers to launch something in it (K24).** `Add Project…` and a
+  click on a saved project both open the project and then show an anchored picker of the
+  available agents; agents with a continue/resume flag drill into the existing
+  New / Continue last / Choose session… step, everything else starts straight away, and
+  "Just open it" dismisses. The launch pins the panel to the chosen folder explicitly
+  (`{ projectDir }`) instead of relying on `openProject` as an ambient default.
+- The two pickers now share one `openPicker(anchor)` helper. It takes an element *or* a
+  rect, which is what makes the drill-down work: `setOpenProject()` re-renders the project
+  list, so the row that was clicked no longer exists by the time the picker is built, and a
+  detached element measures as a zero rect. Each row hands its own rect to its callback
+  before the picker is torn down.
+- **Limit panel toggle became a real checkbox.** It was the one View-menu entry with no
+  `✓` and no persistence — a bare `classList.toggle('hidden')`, so hiding the dock never
+  survived a restart. Now `showLimitDock` sits in the workspace next to `showShortcutBar`,
+  the menu row shows its state, and the label dropped "Show/Hide" (redundant once there's
+  a tick next to it).
+- `npm test` green. **Not exercised in the UI** — Murat had a session running and asked for
+  no restart, so this is syntax-checked and reasoned-through only. First launch is the
+  moment to watch, particularly the picker's position when it's opened from the title-bar
+  label after Add Project.
+
+Then, same day: **the quota dock was measuring the wrong thing entirely (K25).**
+
+- Murat reported that his Claude limits were exhausted while neither the title bar nor the
+  dock showed anything near full. This turned out to be provable rather than a matter of
+  taste. Claude Code stamps a `quotaLimits` object onto an assistant message whenever a
+  request is genuinely rejected; 25 of those, across 8 distinct outages, were already on
+  disk. Replaying the 5-hour window ending at each outage showed our bar read a **median
+  of 38% at the exact moment of lockout** (313K..1.97M tokens, a 6.3x spread). Including
+  cache_creation, cache_read, or a cost-weighted mix never got the spread below 4.4x, and
+  per-model splitting didn't help either — Opus was absent from 5 of the 8 outages.
+  The reason is structural: the limit is cost-weighted server-side and **pooled at org
+  level**, which the rejection records themselves admit
+  (`overageDisabledReason: "org_level_disabled_until"`). Other machines' usage is simply
+  not in this machine's files, so no local metric could ever have worked.
+- **The real number was already on disk**: `~/.claude.json` → `cachedUsageUtilization`,
+  which Claude Code fetches from the server and caches — real `five_hour` / `seven_day`
+  percentages, ISO reset times, `locked_reason`, and an extra-credit `spend` block. It was
+  ~5 minutes fresh during testing, and the file is 0.1 MB / 1.4 ms to parse, so the
+  existing 45-second poll absorbs it for free. Our "zero network requests" rule is intact:
+  Claude Code does the fetching, we read what it leaves behind.
+- The Claude dock card now carries **two** real bars. The **weekly limit had never been
+  shown at all**, and it is regularly the tighter of the two — 73% versus the 5-hour
+  band's 64% while this was being written. The title bar shows whichever band is closest
+  to biting, colour-graded (green/amber/orange/red), with a tooltip giving both and their
+  reset clocks. `locked_reason` prints as FULL rather than a number.
+- Guarded on the assumption that this is someone else's file format: every field degrades
+  to `null` instead of throwing (a crash in `quotas:get` would take the other agents'
+  figures with it), and a `fetchedAtMs` older than 15 minutes dims the card and says
+  "stale" — the cache only refreshes while Claude Code is running.
+- `test/quota-limits.test.js` added, 21 cases, wired into `npm test` (now 15 + 17 + 21 +
+  remote, all green). The last two cases are a live canary against the real
+  `~/.claude.json`, so if upstream renames these fields the suite says so instead of the
+  dock quietly going blank. The dock hint no longer calls itself a placeholder, because
+  for Claude it isn't one any more.
+- **Again not exercised in the UI** (same running session, no restart). Verified as far as
+  it can be without one: 21 unit cases including the live file, plus a static check that
+  every selector `renderClaudeQuota()` queries exists in `index.html`, both locales define
+  every string it prints, and the styles it depends on are present. What that cannot show
+  is layout — two bars in one card is the thing to eyeball on first launch.
+- Method note, cost me a detour twice in one day: **a quoted heredoc still halves
+  backslashes here.** `\\b` written into a scratch script became `\b` in the file, i.e. a
+  literal backspace character, and an i18n check duly reported nine false failures. Write
+  scratch scripts with the Write tool, not a heredoc.
+
+### 2026-09-07
+- **Task/orchestrator reframe — a multi-turn design conversation, no prior code touched
+  (K26).** Murat relayed a ChatGPT-suggested reframe: the core object should be **Task**,
+  not Panel or Agent — a panel is just the surface a task's current phase happens to run
+  on. Product framing landed on "a multi-agent development control plane for local AI
+  coding CLIs." An `architect` subagent read the whole codebase and produced a full
+  proposal: Task/Phase data model (phases embedded in the task, not a separate store),
+  where it lives (main-process config, not the workspace blob — workspace is rewritten
+  wholesale on every save and tasks must outlive a closed panel), a file-by-file
+  integration plan, a transcript-based handoff mechanism (write phase N's output to a
+  file, tell phase N+1's agent to read it — never paste multi-KB text into an interactive
+  TUI), a `mode: oneshot` idea (`agent -p`) that turns "is this phase done?" from a
+  heuristic into a process exit code, a 3-phase migration path, and a risk list headed by
+  "completion can't be reliably detected from a raw pty" and "transcript coverage is only
+  Claude/Gemini, and the missing three are the cheap agents the whole cost thesis depends
+  on routing to."
+- Talked through a fixed single-pipeline "ORCHESTRATOR" diagram Murat also had in hand
+  (Claude=Plan → Gemini=Review → Codex=Code → Verify → Git as one static box). Flagged why
+  the Task/Phase model is the more general version of the same idea: per-task, not
+  hardcoded, agent-per-phase reassignable so a full quota band can route around it — which
+  is the actual point of the project (§1) — and the fixed diagram doesn't show who runs
+  VERIFY or that Git must never auto-commit without confirmation.
+- Confirmed with Murat that project↔agent has always been a loose pairing, not a hard
+  one — nothing today stops opening several agent panels under one project and
+  coordinating them by hand. That's exactly the gap Task closes: the project is the real
+  coordination unit, an agent is just who's running a given phase right now.
+- Two smaller UI ideas came up in the same conversation and were explicitly deferred, not
+  built — see §3.6 (status filters reusing K17/K18's classification; a 3D panel-switch
+  transition, native CSS, cosmetic).
+- **Shipped Phase 0 of the architect's plan: `session:tail`.** New handler in main.js,
+  mirrored in `preload.js` and `remote-bridge.js` (per K22 — every new IPC method needs
+  both, or it silently only works on the host). Reads the last N assistant turns of a
+  *claimed* transcript as plain text, reusing `sessionDirFor`/`readRecentJsonlLines`
+  verbatim and the same trust rule as `quotas:getSession` (only a `session:claim`-issued
+  id, never a folder-newest guess — K19's hijack fix stays intact). `test/session-tail.test.js`
+  added (8 cases, real Claude array-of-blocks and Gemini plain-string transcript shapes,
+  confirms thinking/tool_use blocks are skipped), wired into `npm test` (now 15 + 17 + 8 +
+  21 + remote, all green). No Task record, no UI, no handoff wiring yet — deliberately just
+  the extraction function, since it answers the one assumption ("is a transcript's last
+  turn actually clean enough to hand to the next phase's agent?") the rest of the design
+  depends on. Murat restarted the app himself to pick it up and confirmed `session:tail`
+  live against this session's own transcript.
+- **Shipped Phase 1: Task record + task dock, manual advance, zero automation (K27).**
+  `cfg.tasks` persistence (`tasksGet`/`tasksSave`, mirroring `workspace:get`/`save`'s
+  snapshot-store shape) plus a new `tasks:writeHandoff` (mirrors `scrollbackFile`'s
+  safe-key pattern) for the "write phase output to a file, point the next phase's agent
+  at it with one line" handoff the architect's plan called for — never a raw multi-KB
+  paste into the TUI. Both mirrored into `preload.js`/`remote-bridge.js`/main.js's
+  `remoteHandlers` map per K22. `startAgentPanel` now returns the panel id it created (a
+  one-line addition, every existing caller already ignored the return value) so a Task
+  phase can bind its `panelKey` to the panel it just started. Task dock UI reuses
+  `#limit-dock`'s CSS wholesale (`.dock-card`, `.dock-hint`) and its exact
+  show/hide-toggle wiring (`showTaskDock`/`applyTaskDockVisibility`/View → Task Panel,
+  persisted in the workspace snapshot next to `showLimitDock`). "+ New Task" chains the
+  existing `openPicker` dropdown builder the same way `showAgentLaunchPicker` already
+  does — pick an agent to add as the next phase, repeat, "Done adding phases" to finish.
+  Each phase gets a Start button (spawns its panel, writes+points at the previous
+  phase's handoff if any) or an Advance button (captures the phase's last turn via
+  `session:tail`, marks it done, moves `activePhase` on — but does not auto-start the
+  next phase). `test/tasks.test.js` added (5 cases: config round-trip, that saving tasks
+  doesn't clobber `cfg.workspace`, handoff write + safe-key rejection), wired into
+  `npm test` (now 15 + 17 + 8 + 5 + 21 + remote, all green). Same as Phase 0: the new IPC
+  methods need a restart to take effect (main.js is `require`d once at startup); Murat is
+  running the app himself this session, so this needs his manual restart to exercise in
+  the UI, not mine.
+- **Bug (same session, after restart): "New Task" button did nothing.** Root cause:
+  `showNewTaskPicker` used `window.prompt()` for the task title, and Electron's renderer
+  doesn't implement it — it throws `"prompt() is not supported."` (confirmed against the
+  exact installed Electron version, 44.0.0, in a throwaway standalone process, not the
+  running app). The exception died silently inside the click handler: no crash, no
+  visible error, indistinguishable from a dead button. `window.alert`/`window.confirm`
+  were confirmed to still work (real blocking native dialogs) in the same check. Fixed
+  with `showTextPrompt()`, a small `.project-picker`-styled box with a real DOM `<input>`
+  and OK/Cancel — same visual language as every other picker here, just with typing
+  instead of only click-to-select rows. Documented as a standing gotcha in CLAUDE.md so
+  no future dialog in this app reaches for `prompt()` again.
+
+### 2026-10-22
+- **Agent Room (K28).** A per-project chat room where Claude, Gemini and Codex answer in
+  turn, each reading the whole room before replying. New `room.js` (headless `claude -p`,
+  `gemini -p`, `codex exec`, prompt over stdin), `room:get`/`room:post` IPC mirrored in
+  `preload.js` and `remote-bridge.js`, a tab bar above the main area (Workspace / Agent
+  Room), and the room UI in `renderer.js`. Log: `<project>/.multicli/agent-room.json`.
+- Verified: `node --check` on all edited files, `npm test` green. Not yet verified in the
+  running app: an actual multi-agent exchange, and the `[[NEEDS_USER]]` stop.
+- Headless CLI findings: claude and gemini accept the prompt on stdin; gemini's `-p` needs
+  a value (appended with the piped text); codex needs `--skip-git-repo-check` outside a repo.
