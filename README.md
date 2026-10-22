@@ -47,6 +47,13 @@ sessions, open new panels and switch projects from here.
   LAN: same sessions, same folders, full control (typing, opening new panels, switching
   projects), not a read-only mirror. Token-gated, no TLS by design (see
   [`PROJECT.md` §3.7](PROJECT.md)).
+- **Agent Room** (tab next to Workspace) — a per-project chat where the installed agents
+  answer in turn, each reading the whole room so far. Pick the active agents with the
+  chips beside the tab, or `@name` a single agent; reply to any message to continue
+  with that agent. Long replies fold, images go into the project's `Otomatik Media`
+  folder and show as previews, and a side panel lists the project's files.
+
+  ![Agent Room with active-agent chips and the file panel](.github/screenshot-agent-room.png)
 - **UI language follows the system locale** (TR/EN).
 - Frameless, dark theme similar to Claude Desktop.
 
