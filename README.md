@@ -18,6 +18,22 @@ sessions, open new panels and switch projects from here.
 
 ## Features
 
+- **Agent Room** (tab next to Workspace) — a per-project chat where the installed agents
+  answer in turn, each reading the whole room so far. Pick the active agents with the
+  chips beside the tab, or `@name` a single agent; reply to any message to continue
+  with that agent. Long replies fold, images go into the project's `Otomatik Media`
+  folder and show as previews, and a side panel lists the project's files.
+- **Reply to any message** — the reply goes to that agent alone, with the message it
+  answers quoted in full to the agent, even when older messages have been summarized.
+- **Paste or attach pictures** — Ctrl+V or the 📎 button copies a screenshot into the
+  project's `Otomatik Media` folder as a numbered JPEG and attaches it to the next message.
+- **A working folder per room** — the 📁 button picks where the agents run, separate from
+  the project folder.
+- **Long rooms stay small** — Gemini folds older messages into a running summary, so each
+  turn sends the summary plus the last few messages, not the whole history.
+- **Long replies fold** — anything over 15 lines starts collapsed, with an expand button.
+
+  ![Agent Room with active-agent chips and the file panel](.github/screenshot-agent-room.png)
 - **Directly typable panel grid** — each panel is a real `node-pty` + `xterm.js`
   terminal; click and type into it like any normal terminal. Ctrl+1..8 switches panels,
   PageUp/PageDown/Ctrl+Home/Ctrl+End scroll through history.
@@ -47,22 +63,6 @@ sessions, open new panels and switch projects from here.
   LAN: same sessions, same folders, full control (typing, opening new panels, switching
   projects), not a read-only mirror. Token-gated, no TLS by design (see
   [`PROJECT.md` §3.7](PROJECT.md)).
-- **Agent Room** (tab next to Workspace) — a per-project chat where the installed agents
-  answer in turn, each reading the whole room so far. Pick the active agents with the
-  chips beside the tab, or `@name` a single agent; reply to any message to continue
-  with that agent. Long replies fold, images go into the project's `Otomatik Media`
-  folder and show as previews, and a side panel lists the project's files.
-- **Reply to any message** — the reply goes to that agent alone, with the message it
-  answers quoted in full to the agent, even when older messages have been summarized.
-- **Paste or attach pictures** — Ctrl+V or the 📎 button copies a screenshot into the
-  project's `Otomatik Media` folder as a numbered JPEG and attaches it to the next message.
-- **A working folder per room** — the 📁 button picks where the agents run, separate from
-  the project folder.
-- **Long rooms stay small** — Gemini folds older messages into a running summary, so each
-  turn sends the summary plus the last few messages, not the whole history.
-- **Long replies fold** — anything over 15 lines starts collapsed, with an expand button.
-
-  ![Agent Room with active-agent chips and the file panel](.github/screenshot-agent-room.png)
 - **UI language follows the system locale** (TR/EN).
 - Frameless, dark theme similar to Claude Desktop.
 
